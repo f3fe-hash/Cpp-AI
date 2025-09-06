@@ -2,9 +2,14 @@
 
 #include <vector>
 #include <random>
+#include <algorithm>
+#include <iterator>
+#include <iostream>
 
 #include "utils/defs.hpp"
-#include "utils/math.hpp"
+#include "math/math.hpp"
+
+#define DEBUG
 
 struct dataset_t
 {
@@ -16,20 +21,25 @@ struct dataset_t
 
 class NeuralNetwork
 {
-public:
     num_arr deltax, deltay;
+    vec<num_arr> delta;
     vec<num_arr> layer_outputs;
     vec<num_arr> biases;
     vec<vec<num_arr>> weights;
 
     vec<std::size_t> layer_sizes;
 
-    double lr = 0.01;
+    std::random_device rd{};
+    std::mt19937       gen;
 
+    double lr      = 0.05;
+    int batch_size = 1;
+
+public:
     explicit NeuralNetwork(vec<std::size_t> layer_sizes) noexcept;
-    ~NeuralNetwork() noexcept;
+    ~NeuralNetwork() = default;
 
     num_arr forward(const num_arr* input) noexcept;
 
-    void backprop(const dataset_t* dset, std::size_t size) noexcept;
+    void backprop(const dataset_t* dset) noexcept;
 };

@@ -64,6 +64,7 @@
         "__nullptr": "cpp",
         "__node_handle": "cpp",
         "__split_buffer": "cpp",
-        "queue": "cpp"
+        "queue": "cpp",
+        "future": "cpp"
     }
 }

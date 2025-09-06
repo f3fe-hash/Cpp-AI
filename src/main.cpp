@@ -10,7 +10,7 @@ int main()
         {0, 0},
         {1, 0},
         {0, 1},
-        {1, 1}
+        {1, 1},
     };
 
     const vec<num_arr> y =
@@ -18,7 +18,7 @@ int main()
         {0},
         {1},
         {1},
-        {0}
+        {0},
     };
 
     dataset_t set;
@@ -26,10 +26,10 @@ int main()
     set.y = y;
     set.size = X.size();
 
-    NeuralNetwork nn = NeuralNetwork({2, 3, 1});
+    NeuralNetwork nn = NeuralNetwork({2, 10, 1});
 
     for (std::size_t i = 0; i < 100'000; ++i)
-        nn.backprop(&set, 4);
+        nn.backprop(&set);
 
     // Print the output
     for (std::size_t i = 0; i < set.size; i++)
