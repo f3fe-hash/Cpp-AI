@@ -65,6 +65,10 @@
         "__node_handle": "cpp",
         "__split_buffer": "cpp",
         "queue": "cpp",
-        "future": "cpp"
+        "future": "cpp",
+        "__hash_table": "cpp",
+        "codecvt": "cpp",
+        "fstream": "cpp",
+        "stack": "cpp"
     }
 }

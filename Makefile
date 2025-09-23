@@ -1,23 +1,21 @@
 CXX := g++
 
+ifeq ($(debug),1)
+	DEBUG := -DDEBUG
+	OPTS := -O0 -g
+else
+	OPTS := -O3 -funroll-loops -Os
+endif
+
 WARN     := -Wall -Wextra -Wpedantic
-OPTS     := -O3 -funroll-loops -Os
-CXXFLAGS := $(WARN) $(OPTS) -std=c++17
-
-ifeq ($(gpu),1)
-	GPU := -DUSE_CUDA
-endif
-
-ifeq ($(gpu),2)
-	GPU      := -DUSE_OPENCL
-	GPU_LIBS := -lOpenCL
-endif
+CXXFLAGS := $(WARN) $(OPTS) $(DEBUG) -std=c++17
+LIBS     := -lOpenCL
 
 SRC_DIR     := src
 INCLUDE_DIR := include
 BUILD_DIR   := build
 
-TARGET := $(BUILD_DIR)/ai
+TARGET := $(BUILD_DIR)/nn
 
 SRC := $(shell find $(SRC_DIR) -name '*.cpp')
 OBJ := $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.cpp.o,$(SRC))
@@ -33,12 +31,9 @@ all: $(TARGET)
 
 $(TARGET): $(OBJ)
 	@printf "$(BLUE)  LD     Linking $@\n$(RESET)"
-	@$(CXX) $(CXXFLAGS) $(OBJ) -o $(TARGET) $(GPU_LIBS)
-ifeq ($(gpu),1)
-	@printf "$(YELLOW)  WARN   Warning: Using CUDA GPU\n"
-endif
-ifeq ($(gpu),2)
-	@printf "$(YELLOW)  WARN   Warning: Using Intel/AMD GPU\n"
+	@$(CXX) $(CXXFLAGS) $(OBJ) -o $(TARGET) $(LIBS)
+ifeq ($(debug),1)
+	@printf "$(YELLOW)  WARN   Warning: Compiling in DEBUG MODE\n"
 endif
 
 $(BUILD_DIR)/%.cpp.o: $(SRC_DIR)/%.cpp | $(DIR)
@@ -54,7 +49,13 @@ clean:
 
 run:
 	@printf "$(YELLOW)  RUN    Running executable $(TARGET)\n$(RESET)"
+ifeq ($(debug),1)
+	@gdb $(TARGET)
+else
 	@./$(TARGET)
+endif
+	@printf "$(YELLOW)  RUN    Done running executable $(TARGET)\n$(RESET)"
 
 size:
-	@wc -c $(TARGET)
+	@wc -c < $(TARGET) | awk '{printf "%.2f KB\n", $$1 / 1000}'
+

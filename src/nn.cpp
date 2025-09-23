@@ -1,9 +1,9 @@
 #include "nn.hpp"
 
-NeuralNetwork::NeuralNetwork(vec<std::size_t> layer_sizes) noexcept
+NeuralNetwork::NeuralNetwork(vec<uint> layer_sizes) noexcept
 {
     this->layer_sizes = layer_sizes;
-    std::size_t num_layers = layer_sizes.size();
+    uint num_layers = layer_sizes.size();
 
     gen = std::mt19937(rd());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
@@ -14,51 +14,83 @@ NeuralNetwork::NeuralNetwork(vec<std::size_t> layer_sizes) noexcept
 
     weights[0] = {{}};
     biases[0]  = {};
-    for (std::size_t i = 1; i < num_layers; ++i)
+    for (uint i = 1; i < num_layers; ++i)
     {
         weights[i].resize(layer_sizes[i]);
         biases[i].resize(layer_sizes[i]);
 
-        for (std::size_t j = 0; j < layer_sizes[i]; ++j)
+        for (uint j = 0; j < layer_sizes[i]; ++j)
         {
             weights[i][j].resize(layer_sizes[i - 1]); // Each neuron connects to all neurons in previous layer
-            for (std::size_t k = 0; k < layer_sizes[i - 1]; ++k)
+            for (uint k = 0; k < layer_sizes[i - 1]; ++k)
                 weights[i][j][k] = (num)dist(gen);
             biases[i][j] = (num)dist(gen);
         }
     }
 
     this->delta.resize(this->layer_sizes.size());
+
+    // Only initialize once
+    if (__nn_math_context.local_work_size == 0)
+        cl_math_init();
 }
 
 num_arr NeuralNetwork::forward(const num_arr* input) noexcept
 {
-    this->deltax = *input;
-
     this->layer_outputs.clear();
-    this->layer_outputs.push_back(this->deltax); // Save input layer activations
+    this->layer_outputs.resize(this->layer_sizes.size());
+    this->layer_outputs[0] = *input;
 
-    for (std::size_t layer = 1; layer < layer_sizes.size(); ++layer)
+    num_arr current = *input;
+
+    for (uint layer = 1; layer < layer_sizes.size(); ++layer)
     {
-        std::size_t num_neurons = layer_sizes[layer];
-        this->deltay.resize(num_neurons);
+        const uint in_size  = layer_sizes[layer - 1];
+        const uint out_size = layer_sizes[layer];
 
-        for (std::size_t neuron = 0; neuron < num_neurons; ++neuron)
-            this->deltay[neuron] = mult_add(deltax, weights[layer][neuron], biases[layer][neuron], deltax.size());
+        // Flatten weights
+        std::vector<float> weights_flat(out_size * in_size);
+        for (uint o = 0; o < out_size; ++o)
+            for (uint i = 0; i < in_size; ++i)
+                weights_flat[o * in_size + i] = weights[layer][o][i];
 
-        // Apply activation function
-        this->deltay = activation(this->deltay, this->deltay.size());
-        this->deltax.swap(this->deltay);
+        // Setup OpenCL buffers
+        cl::Buffer buf_input(__nn_math_context.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                             sizeof(float) * in_size, current.data());
+        cl::Buffer buf_weights(__nn_math_context.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                               sizeof(float) * weights_flat.size(), weights_flat.data());
+        cl::Buffer buf_biases(__nn_math_context.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                              sizeof(float) * out_size, biases[layer].data());
+        cl::Buffer buf_output(__nn_math_context.context, CL_MEM_WRITE_ONLY,
+                              sizeof(float) * out_size);
 
-        // Save current layer output
-        this->layer_outputs.push_back(this->deltax);
+        // Set up kernel
+        cl::Kernel kernel = __nn_math_context.getKernel("forward_layer");
+        kernel.setArg(0, buf_input);
+        kernel.setArg(1, buf_weights);
+        kernel.setArg(2, buf_biases);
+        kernel.setArg(3, buf_output);
+        kernel.setArg(4, (int)in_size);
+        kernel.setArg(5, (int)out_size);
+
+        // Run kernel
+
+        __nn_math_context.queue.enqueueNDRangeKernel(kernel, cl::NullRange,
+            cl::NDRange(out_size), cl::NullRange);
+        __nn_math_context.queue.finish();
+
+        // Read back result
+        current.resize(out_size);
+        __nn_math_context.queue.enqueueReadBuffer(buf_output, CL_TRUE, 0,
+            sizeof(float) * out_size, current.data());
+
+        // ✅ Save current layer output
+        this->layer_outputs[layer] = current;
     }
 
-    return this->deltax;
+    return current;
 }
 
-// Warning: size IS NOT THE AMOUNT OF EPOCHS TO RUN. Instead it is the number of dataset values to do at a time.
-// If greater than the total size of the dataset, will default to the total size
 void NeuralNetwork::backprop(const dataset_t* dset) noexcept
 {
 #ifdef DEBUG
@@ -70,89 +102,79 @@ void NeuralNetwork::backprop(const dataset_t* dset) noexcept
 #endif
 
     // Clamp batch sizes
-    if ((std::size_t)this->batch_size > dset->size)
+    if (this->batch_size > dset->size)
         this->batch_size = dset->size;
 
+    const uint num_batches = (dset->size + this->batch_size - 1) / this->batch_size;
 
-    const std::size_t num_batches = (dset->size + this->batch_size - 1) / this->batch_size;
-
-    vec<vec<num_arr>> X(num_batches), y(num_batches);
+    vec<num_arr2D> X(num_batches), y(num_batches);
 
     // Split data into batches
-    for (std::size_t i = 0; i < dset->size; i += this->batch_size)
+    vec<uint> batch_sizes;
+    for (uint i = 0; i <= dset->size; i += this->batch_size)
     {
-        std::size_t batch_idx = i / this->batch_size;
-        std::size_t end = std::min(i + this->batch_size, dset->size);
+        const uint batch_idx = i / this->batch_size;
+        const uint end = std::min(i + this->batch_size, dset->size);
+
+        batch_sizes.push_back(end - i);
 
         X[batch_idx].insert(X[batch_idx].end(), dset->X.begin() + i, dset->X.begin() + end);
         y[batch_idx].insert(y[batch_idx].end(), dset->y.begin() + i, dset->y.begin() + end);
     }
 
-    for (std::size_t batch = 0; batch < num_batches; ++batch)
+    const uint L           = this->layer_sizes.size() - 1;
+    const uint output_size = this->layer_sizes[L];
+
+    num_arr output;
+    num_arr losses(output_size);
+    for (uint batch = 0; batch < num_batches; ++batch)
     {
-        std::size_t L = this->layer_sizes.size() - 1;
-
-        for (std::size_t i = 0; i < X[batch].size(); ++i)
+        for (uint i = 0; i < X[batch].size(); ++i)
         {
-            const num_arr output = this->forward(&X[batch][i]);
+            output = this->forward(&X[batch][i]);
 
-            if (i == 0)
-                delta[L].assign(output.size(), (num)0.0); // Safe initialization for accumulation
+            // Get loss
+            num_arr _losses = error(output, y[batch][i], output_size);
+            for (uint j = 0; j < output_size; ++j) 
+                losses[j] += _losses[j];
+        }
 
-#ifdef DEBUG
-            if (__builtin_expect(L >= delta.size(), 0))
-            {
-                std::cerr << "[ERROR] L is out of bounds for delta!" << std::endl;
-                std::exit(1);
-            }
-#endif
-
-            const num_arr& d_act = activation_derv(output, output.size());
-            const num_arr& losses = error(output, y[batch][i], output.size());
-
-#ifdef DEBUG
-            if (__builtin_expect(losses.size() != d_act.size(), false))
-            {
-                std::cerr << "[ERROR] Mismatch: losses.size() = " << losses.size()
-                        << ", d_act.size() = " << d_act.size() << std::endl;
-                std::exit(1);
-            }
-
-            if (__builtin_expect(delta[L].size() != losses.size(), 0))
-            {
-                std::cerr << "[ERROR] Mismatch: delta[" << L << "].size() = " << delta[L].size()
-                        << ", expected = " << losses.size() << std::endl;
-                std::exit(1);
-            }
-#endif
+        for (num& n : losses)
+            n /= X[batch].size();
+        
+        // Output layer deltas
+        delta[L].assign(num_batches, zero); // Safe initialization for accumulation
+        for (uint i = 0; i < X[batch].size(); ++i)
+        {
+            const num_arr& d_act = activation_derv(output, output_size);
 
             // Output layer delta
-            for (std::size_t k = 0; k < output.size(); ++k)
+            for (uint k = 0; k < output_size; ++k)
                 delta[L][k] = losses[k] * d_act[k] + delta[L][k];
         }
 
         // Hidden layer deltas
-        for (std::size_t l = L; l > 1; --l)
+        for (uint l = L; l > 1; --l)
         {
-            std::size_t neurons = this->layer_sizes[l - 1];
+            uint neurons = this->layer_sizes[l - 1];
             delta[l].resize(this->layer_sizes[l]);
             delta[l - 1].resize(neurons);
             const num_arr& dervs = activation_derv(layer_outputs[l - 1], layer_outputs[l - 1].size());
-            for (std::size_t j = 0; j < neurons; ++j)
+            for (uint j = 0; j < neurons; ++j)
             {
                 num sum = zero;
-                for (std::size_t k = 0; k < layer_sizes[l]; ++k)
+                for (uint k = 0; k < layer_sizes[l]; ++k)
                     sum += weights[l][k][j] * delta[l][k];
                 delta[l - 1][j] = sum * dervs[j];
             }
         }
 
         // Gradient descent step
-        for (std::size_t l = 1; l < this->layer_sizes.size(); ++l)
+        for (uint l = 1; l < this->layer_sizes.size(); ++l)
         {
-            for (std::size_t j = 0; j < this->layer_sizes[l]; ++j)
+            for (uint j = 0; j < this->layer_sizes[l]; ++j)
             {
-                for (std::size_t k = 0; k < weights[l][j].size(); ++k)
+                for (uint k = 0; k < weights[l][j].size(); ++k)
                     weights[l][j][k] -= (num)(this->lr * delta[l][j] * layer_outputs[l - 1][k]);
                 biases[l][j] -= (num)(this->lr * delta[l][j]);
             }
